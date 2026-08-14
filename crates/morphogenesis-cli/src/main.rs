@@ -9,8 +9,16 @@ fn main() -> std::io::Result<()> {
     println!("header length = {header_len}");
 
     let header = safetensors::read_header_bytes(path)?;
+    let tensors = safetensors::parse_header(&header).unwrap();
     println!("header bytes read = {}", header.len());
-    println!("first 80 bytes:\n{}", String::from_utf8_lossy(&header[..80]));
+
+    println!("tensors = {}", tensors.len());
+    println!("{:?}", tensors.get("model.norm.weight"));
+
+    println!(
+        "first 80 bytes:\n{}",
+        String::from_utf8_lossy(&header[..80])
+    );
 
     Ok(())
 }
