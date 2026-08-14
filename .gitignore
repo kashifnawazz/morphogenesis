@@ -1,0 +1,11 @@
+# Python related files
+.venv
+/venv*
+# .container is name of my virtual envioronment
+.container
+
+# Rust Related Files
+
+# Added by cargo
+
+/target
