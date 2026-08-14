@@ -9,3 +9,6 @@
 # Added by cargo
 
 /target
+
+# Model weights — downloaded, not versioned
+/models
