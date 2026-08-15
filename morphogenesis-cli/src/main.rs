@@ -1,9 +1,11 @@
 use std::path::Path;
 
+use morphogenesis_core::config::Config;
 use morphogenesis_core::safetensors::SafeTensors;
 
 fn main() -> std::io::Result<()> {
     let path = Path::new("models/qwen3-0.6b/model.safetensors");
+    let cfg = Config::load(Path::new("models/qwen3-0.6b/config.json"))?;
     let st = SafeTensors::open(path)?;
 
     println!("tensors    = {}", st.len());
@@ -25,6 +27,8 @@ fn main() -> std::io::Result<()> {
     println!("\nmodel.layers.0.self_attn.q_proj.weight");
     println!("  numel  {}", q.len());
     println!("  first3 {:?}", &q[..3]);
+
+    println!("{cfg:#?}");
 
     Ok(())
 }
