@@ -4,6 +4,10 @@ use std::fs::File;
 use std::io::{Error, ErrorKind, Read};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::weights::Weights;
 
 /// One entry from the table of contents at the front of the file.
 #[derive(Debug, Deserialize)]
@@ -30,6 +34,29 @@ pub struct SafeTensors {
     file: File,
     tensors: HashMap<String, TensorInfo>,
     data_start: u64,
+    bytes_read: AtomicU64,
+}
+
+impl Weights for SafeTensors {
+    fn get(&self, name: &str) -> std::io::Result<Arc<[f32]>> {
+        Ok(SafeTensors::get(self, name)?.into())
+    }
+
+    fn get_row(&self, name: &str, row: usize) -> std::io::Result<Vec<f32>> {
+        SafeTensors::get_row(self, name, row)
+    }
+
+    fn bytes_read(&self) -> u64 {
+        self.bytes_read.load(Ordering::Relaxed)
+    }
+
+    fn reset_bytes(&self) {
+        self.bytes_read.store(0, Ordering::Relaxed);
+    }
+
+    fn describe(&self) -> String {
+        format!("safetensors ({} tensors, alphabetical order)", self.len())
+    }
 }
 
 impl SafeTensors {
@@ -53,6 +80,7 @@ impl SafeTensors {
             file,
             tensors,
             data_start: 8 + header_len,
+            bytes_read: AtomicU64::new(0),
         })
     }
 
@@ -79,6 +107,53 @@ impl SafeTensors {
         names
     }
 
+    /// Read just ONE ROW of a 2-D tensor.
+    ///
+    /// The embedding table is 151,936 rows of 1,024 numbers -- 622 MB if you
+    /// load it all as f32. But looking up a word only needs one row, 2 KB.
+    /// So we work out where that row sits and read only those bytes.
+    pub fn get_row(&self, name: &str, row: usize) -> std::io::Result<Vec<f32>> {
+        let info = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no tensor named {name}")))?;
+
+        let row_len = *info.shape.last().unwrap();
+        let item = if info.dtype == "F32" { 4u64 } else { 2u64 };
+        let row_bytes = row_len as u64 * item;
+
+        let mut raw = vec![0u8; row_bytes as usize];
+        let offset = self.data_start + info.data_offsets.0 + row as u64 * row_bytes;
+        self.file.read_exact_at(&mut raw, offset)?;
+        self.bytes_read.fetch_add(row_bytes, Ordering::Relaxed);
+
+        match info.dtype.as_str() {
+            "BF16" => Ok(bf16_to_f32(&raw)),
+            "F32" => Ok(raw
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()),
+            other => Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("{name}: unsupported dtype {other}"),
+            )),
+        }
+    }
+
+    /// The tensor's bytes exactly as they sit on disk, no conversion.
+    /// Used by the repacker, which copies bytes rather than numbers.
+    pub fn get_raw(&self, name: &str) -> std::io::Result<Vec<u8>> {
+        let info = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no tensor named {name}")))?;
+        let mut raw = vec![0u8; info.nbytes() as usize];
+        self.file
+            .read_exact_at(&mut raw, self.data_start + info.data_offsets.0)?;
+        self.bytes_read.fetch_add(info.nbytes(), Ordering::Relaxed);
+        Ok(raw)
+    }
+
     /// Read one tensor off the disk and hand back its numbers as f32.
     ///
     /// Takes `&self`, not `&mut self`, because `read_exact_at` reads at an
@@ -95,6 +170,7 @@ impl SafeTensors {
         let mut raw = vec![0u8; info.nbytes() as usize];
         self.file
             .read_exact_at(&mut raw, self.data_start + info.data_offsets.0)?;
+        self.bytes_read.fetch_add(info.nbytes(), Ordering::Relaxed);
 
         match info.dtype.as_str() {
             "BF16" => Ok(bf16_to_f32(&raw)),

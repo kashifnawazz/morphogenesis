@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
+#[derive(Clone)]
 pub struct Config {
     pub hidden_size: usize,
     pub num_hidden_layers: usize,
