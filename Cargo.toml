@@ -2,6 +2,6 @@
 resolver = "3"
 
 members = [
-    "crates/morphogenesis-core",
-    "crates/morphogenesis-cli",
+    "morphogenesis-core",
+    "morphogenesis-cli",
 ]

@@ -170,9 +170,8 @@ tensor should be `lm_head.weight`, `[151936, 1024]`, BF16.
 ## Layout
 
 ```
-crates/
-  morphogenesis-core/     the engine — loader, kernels, model, streaming
-  morphogenesis-cli/      command-line entry point
+morphogenesis-core/       the engine — loader, kernels, model, streaming
+morphogenesis-cli/        command-line entry point
 docs/
   guide/                  the learning series (01–04)
   roadmap.md              phases and validation gates
