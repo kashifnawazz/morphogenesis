@@ -116,8 +116,10 @@ impl SafeTensors {
 /// same bias. So widening it is just sticking 16 zero bits on the bottom.
 /// No maths, just moving bits.
 ///
+/// ```text
 ///     bf16:                    0011111000001011
 ///     f32:     0011111000001011 0000000000000000
+/// ```
 fn bf16_to_f32(raw: &[u8]) -> Vec<f32> {
     raw.chunks_exact(2)
         .map(|pair| {
