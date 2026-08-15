@@ -4,6 +4,13 @@
 //! Everything else in the engine is these five functions called in the right
 //! order with the right numbers.
 
+use rayon::prelude::*;
+
+/// Below this many multiply-adds, spreading the work across threads costs
+/// more than it saves. Tuned by eye; the small kernels (norms on a 128-wide
+/// head) are nowhere near it.
+const PARALLEL_THRESHOLD: usize = 1 << 18;
+
 /// Rescale a list of numbers so they're a sensible size, then apply a
 /// learned per-slot weight.
 ///
@@ -86,12 +93,22 @@ pub fn matvec(w: &[f32], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
     assert_eq!(w.len(), out_dim * in_dim, "matvec: weight size mismatch");
     assert_eq!(x.len(), in_dim, "matvec: input size mismatch");
 
-    (0..out_dim)
-        .map(|i| {
-            let row = &w[i * in_dim..(i + 1) * in_dim];
-            row.iter().zip(x).map(|(a, b)| a * b).sum()
-        })
-        .collect()
+    // Every output number is independent of every other, so the rows can be
+    // shared out across cores with no coordination at all.
+    //
+    // Note each row is still summed in the same left-to-right order, so the
+    // answer is bit-for-bit identical to the single-threaded version.
+    // Splitting a row across threads would change the summation order and
+    // give slightly different results run to run.
+    if out_dim * in_dim >= PARALLEL_THRESHOLD {
+        w.par_chunks_exact(in_dim)
+            .map(|row| row.iter().zip(x).map(|(a, b)| a * b).sum())
+            .collect()
+    } else {
+        w.chunks_exact(in_dim)
+            .map(|row| row.iter().zip(x).map(|(a, b)| a * b).sum())
+            .collect()
+    }
 }
 
 /// Stamp "where in the sentence am I" onto a vector, by rotating it.
