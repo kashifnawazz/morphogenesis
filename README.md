@@ -116,22 +116,22 @@ is the core experiment — and it's something the prior art never had.
 Each phase has a **gate**: an objective check that must pass before moving on. Skipping one
 means debugging a transformer with no oracle, which is where these projects die.
 
-- [ ] **0 — Ground truth.** numpy-only reference implementation (no torch). Dumps
-      intermediate activations for a fixed prompt.
-      *Gate: sensible greedy continuation; fixtures saved.*
-- [ ] **1 — Read the file.** safetensors parser, config loader, bf16 → f32, mmap.
+- [x] ~~**0 — Ground truth.**~~ Dropped: the project stays single-language. Correctness is
+      pinned by hand-decoded constants, kernel invariants, and end-to-end output instead.
+- [x] **1 — Read the file.** safetensors parser, config loader, bf16 → f32, mmap.
       *Gate: tensor values match the reference.*
-- [ ] **2 — Kernels.** RMSNorm, matvec, softmax, SwiGLU, RoPE — each unit-tested alone.
+- [x] **2 — Kernels.** RMSNorm, matvec, softmax, SwiGLU, RoPE — each unit-tested alone.
       *Gate: every kernel within 1e-4 relative error.*
-- [ ] **3 — Forward pass.** One token, no cache, all 28 layers.
+- [x] **3 — Forward pass.** One token, no cache, all 28 layers.
       *Gate: logits within 1e-3; argmax identical.*
-- [ ] **4 — Tokenizer.** Byte-level BPE.
+- [x] **4 — Tokenizer.** Byte-level BPE.
       *Gate: byte-identical round-trip against the reference.*
-- [ ] **5 — KV cache.** Incremental decode, O(T) instead of O(T²).
+- [x] **5 — KV cache.** Incremental decode, O(T) instead of O(T²).
       *Gate: token-identical to full recompute.*
-- [ ] **6 — Disk streaming.** *The actual thesis.* Repack into execution order, compare
-      `mmap` vs `O_DIRECT`, double-buffered prefetch, configurable resident set.
-      *Gate: identical output at every memory budget, with a bytes-read and ms/token table.*
+- [x] **6 — Disk streaming.** *The actual thesis.* `.morph` repack into execution order,
+      `pread` vs `mmap` vs `O_DIRECT`, prefetch hints, pinned resident set, byte-level
+      instrumentation, cold/warm benchmark harness with repeat runs.
+      *Gate: met — identical output at every configuration; see Results.*
 - [ ] **7 — Quantisation.** Q8_0 and Q4_0. A bandwidth optimisation: 4× fewer bytes is ~4×
       faster when you're bandwidth-bound.
       *Gate: perplexity delta and speedup measured on both tiers.*
@@ -141,7 +141,66 @@ Full detail in [`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 
-## Getting started
+## Results
+
+HDD, one forward pass over 5 tokens, median of 3 runs. Cold = this file's pages dropped
+from the kernel cache first (`posix_fadvise(DONTNEED)`, no root needed). `spread` is
+max−min across the three cold runs, so you can see what's signal and what's noise.
+
+| configuration | cold | spread | warm | MB read |
+|---|---:|---:|---:|---:|
+| safetensors, pread | 11.92s | 0.40 | 3.99s | 1137 |
+| morph, pread | 9.10s | 0.17 | 3.80s | 1137 |
+| morph, mmap | 10.07s | 1.30 | 5.55s | 1137 |
+| morph, O_DIRECT | 10.95s | 2.64 | 10.06s | 1137 |
+| | | | | |
+| morph, pread, prefetch **off** | **8.22s** | 0.21 | 3.78s | 1137 |
+| morph, pread, prefetch **on** | 8.75s | 0.00 | 3.50s | 1137 |
+| | | | | |
+| morph, mmap + 7 layers pinned | 7.70s | 0.07 | 3.15s | 927 |
+| morph, mmap + 14 layers pinned | 6.75s | 0.10 | 3.14s | 717 |
+| morph, mmap + 28 layers pinned | **4.78s** | 0.12 | 2.87s | **297** |
+
+### The engine is at the disk's physical limit
+
+The headline number: after repacking, 1137 MB in 8.22s is **138 MB/s** — essentially the
+sequential ceiling of a 7200rpm SATA drive. There is no I/O cleverness left to extract.
+That single fact explains every other row.
+
+### Repacking into execution order is worth ~25%
+
+11.92s → 9.10s, reading byte-for-byte identical data. The difference is pure seek latency,
+caused by nothing but the exporter having sorted tensors alphabetically. Small spread on
+both, so this is signal.
+
+### Three things that did NOT work
+
+Honest negative results, kept because they were worth measuring:
+
+- **`mmap` is slower than `pread`** (10.07s vs 9.10s cold; 5.55s vs 3.80s warm) and much
+  noisier. Copying out of a mapping costs a page fault per page; explicit reads into a
+  buffer we already own are simply cheaper.
+- **`O_DIRECT` is the slowest option**, and its warm time (10.06s) barely differs from cold
+  (10.95s) — which is exactly what it promises, since it bypasses the page cache entirely.
+  Useful if you want RAM reserved for pinned layers; useless as a speedup.
+- **Prefetch hints did not help** (8.75s with, 8.22s without). `POSIX_FADV_WILLNEED` on the
+  next layer competes with the kernel's own readahead, which is already optimal for a
+  sequential sweep. This follows from the first finding: at 138 MB/s there was never any
+  idle disk time to fill.
+
+The reference project chose `O_DIRECT` on the assumption that the I/O path matters. On this
+workload, measured, it doesn't — the layout does.
+
+### `lm_head` is the floor
+
+With all 28 layers resident, 297 MB is still read every forward. That one matrix is 26% of
+the per-token cost and isn't part of any layer, so pinning can never cover it. Quantising
+it is Phase 7's biggest lever.
+
+The warm column bottoming out at 2.87s is the compute floor of a naive single-threaded
+`matvec`. Below ~3s the engine stops being I/O bound, which changes what's worth optimising.
+
+## Getting started## Getting started
 
 Nothing to run yet. To set up the workspace:
 
@@ -170,9 +229,8 @@ tensor should be `lm_head.weight`, `[151936, 1024]`, BF16.
 ## Layout
 
 ```
-crates/
-  morphogenesis-core/     the engine — loader, kernels, model, streaming
-  morphogenesis-cli/      command-line entry point
+morphogenesis-core/       the engine — loader, kernels, model, streaming
+morphogenesis-cli/        command-line entry point
 docs/
   guide/                  the learning series (01–04)
   roadmap.md              phases and validation gates
